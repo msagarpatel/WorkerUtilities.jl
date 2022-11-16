@@ -122,23 +122,45 @@ check to see if it's their turn to execute.
 
 A synchronizer's state can be reset to a specific value (1 by default)
 by calling `reset!(x, i)`.
+
+A synchronizer can be cancelled by calling [`cancel!(x)`](@ref).
 """
 mutable struct OrderedSynchronizer
     coordinating_task::Task
     cond::Threads.Condition
     i::Int
+    cancelled::Bool
 end
 
-OrderedSynchronizer(i=1) = OrderedSynchronizer(current_task(), Threads.Condition(), i)
+function OrderedSynchronizer(i=1)
+    return OrderedSynchronizer(current_task(), Threads.Condition(), i, false)
+end
 
 """
     reset!(x::OrderedSynchronizer, i=1)
 
-Reset the state of `x` to `i`.
+Reset the state of `x` to `i`, and un-cancel `x`.
 """
 function reset!(x::OrderedSynchronizer, i=1)
     Base.@lock x.cond begin
         x.i = i
+        x.cancelled = false
+    end
+end
+
+"""
+    cancel!(x::OrderedSynchronizer)
+
+Cancel the OrderedSynchronizer so all scheduled work that has not started executing is
+aborted, and new work does not execute. Work that is already executing is not affected, and
+runs to completion.
+
+Cancellation can be undone by calling [`reset!(x, i)`](@ref).
+"""
+function cancel!(x::OrderedSynchronizer)
+    Base.@lock x.cond begin
+        x.cancelled = true
+        notify(x.cond)
     end
 end
 
@@ -169,9 +191,10 @@ incremented after `f` is called. By default, `incr` is 1.
 function Base.put!(f, x::OrderedSynchronizer, i, incr=1)
     Base.@lock x.cond begin
         # wait until we're ready to execute f
-        while x.i != i
+        while x.i != i && !x.cancelled
             wait(x.cond)
         end
+        x.cancelled && return
         try
             f()
         catch e
